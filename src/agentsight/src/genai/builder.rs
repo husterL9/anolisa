@@ -207,11 +207,11 @@ impl GenAIBuilder {
 
         // Parse messages from body to extract user_query / input_messages /
         // system_instructions / first_user_text / last_user_text。session_id 与
-        // conversation_id 在 request 阶段采用双层兑底：
+        // conversation_id 在 request 阶段采用双层兜底：
         //   1. 优先走 IdResolver::peek_*（同 PID 之前有过正常完成的调用 →
         //      LRU 已 anchor 首个 response_id，复用后与正常路径完全对齐）。
         //   2. 未命中时 → `crash_fallback_id`以 (agent_name, pid, user_text) 作为
-        //      兑底 ID 输入，保证 crash-drain 路径同 PID 同 user_query 的
+        //      兜底 ID 输入，保证 crash-drain 路径同 PID 同 user_query 的
         //      crash 记录归一桶，不同 user_query 分桶。
         //
         // 正常响应到达后 `complete_pending` 仍会用 `IdResolver::resolve_*`
@@ -326,7 +326,7 @@ impl GenAIBuilder {
         )
         .or_else(|| Some(request.source_event.comm_str()));
 
-        // 双层兑底计算 session_id / conversation_id（详见上方注释）。
+        // 双层兜底计算 session_id / conversation_id（详见上方注释）。
         // 这里不使用 unwrap_or_else(|| “”) 是为了让“同 PID 同 agent”上下文下
         // crash_fallback_id 输入始终相同。
         let agent_name_str = agent_name.as_deref().unwrap_or("");
@@ -358,7 +358,7 @@ impl GenAIBuilder {
         Some(PendingCallInfo {
             call_id,
             trace_id: None, // LLM API response_id, not available until response
-            // session_id / conversation_id 在请求阶段采用双层兑底：
+            // session_id / conversation_id 在请求阶段采用双层兜底：
             // 1) IdResolver::peek_* 复用同 PID 之前正常完成调用的 anchor，
             //    响应到达后 `complete_pending` 会用同样的值覆盖；
             // 2) LRU miss 时走 `crash_fallback_id`（`crash-` 前缀与正常 ID 隔离），

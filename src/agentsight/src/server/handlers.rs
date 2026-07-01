@@ -1382,3 +1382,80 @@ fn compute_skill_metrics_response(
     let report = crate::skill_metrics::compute_skill_metrics(&events, &options);
     HttpResponse::Ok().json(report)
 }
+
+// ─── Evaluation API ──────────────────────────────────────────────────────────
+
+/// POST /api/eval/session/{session_id}
+/// Trigger DAG evaluation for a session. Runs synchronously (blocks until done).
+/// Returns the complete EvalReport JSON on success.
+#[post("/api/eval/session/{session_id}")]
+pub async fn trigger_eval(
+    data: web::Data<AppState>,
+    session_id: web::Path<String>,
+) -> impl Responder {
+    use crate::eval::evaluator;
+    use crate::eval::judge::JudgeConfig;
+    use crate::atif::converter::convert_session_to_atif;
+    use crate::storage::sqlite::genai::GenAISqliteStore;
+
+    let session_id = session_id.into_inner();
+
+    // 1. Load events for the session (same pattern as export_atif_session)
+    let store = match GenAISqliteStore::new_with_path(&data.storage_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": format!("failed to open genai store: {}", e)}));
+        }
+    };
+
+    let events = match store.get_events_by_session(&session_id) {
+        Ok(e) => e,
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": format!("failed to load session events: {}", e)}));
+        }
+    };
+
+    if events.is_empty() {
+        return HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "session not found or has no events"}));
+    }
+
+    let atif_doc = match convert_session_to_atif(&session_id, events) {
+        Ok(doc) => doc,
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": format!("ATIF conversion failed: {}", e)}));
+        }
+    };
+
+    // 2. Build judge config from env vars
+    let api_key = std::env::var("DASHSCOPE_API_KEY")
+        .or_else(|_| std::env::var("OPENAI_API_KEY"))
+        .unwrap_or_default();
+
+    if api_key.is_empty() {
+        return HttpResponse::BadRequest()
+            .json(serde_json::json!({"error": "DASHSCOPE_API_KEY or OPENAI_API_KEY env var required for evaluation"}));
+    }
+
+    let config = JudgeConfig {
+        api_key,
+        model: std::env::var("EVAL_JUDGE_MODEL").unwrap_or_else(|_| "qwen-max".to_string()),
+        api_base_url: std::env::var("EVAL_API_BASE_URL")
+            .unwrap_or_else(|_| "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string()),
+        ..JudgeConfig::default()
+    };
+
+    // 3. Run Algorithm 1 (blocking — may take 30-120s depending on node count)
+    let report = match evaluator::evaluate(&atif_doc, &config) {
+        Ok(r) => r,
+        Err(e) => {
+            return HttpResponse::InternalServerError()
+                .json(serde_json::json!({"error": format!("evaluation failed: {}", e)}));
+        }
+    };
+
+    HttpResponse::Ok().json(&report)
+}

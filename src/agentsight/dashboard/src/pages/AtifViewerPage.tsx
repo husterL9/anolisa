@@ -1,9 +1,13 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import type {
   AtifDocument, AtifStep, AtifToolCall, AtifObservation, AtifStepMetrics,
 } from '../types';
-import { fetchAtifBySession, fetchAtifByConversation } from '../utils/apiClient';
+import type { DagNode } from '../types/dag';
+import { fetchAtifBySession, fetchAtifByConversation, triggerEval } from '../utils/apiClient';
+import type { EvalReport } from '../utils/apiClient';
+import { parseAtifToDag, groupNodesByStep } from '../utils/dagParser';
+import { DagOverview, NODE_TYPE_STYLE } from '../components/DagOverview';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -121,9 +125,10 @@ interface StepCardProps {
   step: AtifStep;
   expandedSections: Set<string>;
   onToggleSection: (key: string) => void;
+  dagNodes?: DagNode[];
 }
 
-const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSection }) => {
+const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSection, dagNodes }) => {
   const style = getSourceStyle(step.source);
   const sectionKey = (name: string) => `${step.step_id}-${name}`;
   const isOpen = (name: string) => expandedSections.has(sectionKey(name));
@@ -159,6 +164,29 @@ const StepCard: React.FC<StepCardProps> = ({ step, expandedSections, onToggleSec
             </span>
           )}
         </div>
+
+        {/* DAG node-type badges */}
+        {dagNodes && dagNodes.length > 0 && (
+          <div className="px-5 pb-2 flex flex-wrap gap-1.5">
+            {dagNodes.map((n) => {
+              const ns = NODE_TYPE_STYLE[n.type];
+              const suffix = n.unrolled_iter !== undefined ? ` #${n.unrolled_iter}` : '';
+              const detail =
+                n.type === 'TOOLSEL' || n.type === 'PARAMGEN' || n.type === 'EXEC'
+                  ? `: ${n.label}`
+                  : '';
+              return (
+                <span
+                  key={n.id}
+                  className={`text-[10px] px-1.5 py-0.5 border rounded ${ns.badge}`}
+                  title={`${n.id}\n${n.preview || ''}`}
+                >
+                  {ns.label}{detail}{suffix}
+                </span>
+              );
+            })}
+          </div>
+        )}
 
         {/* Body */}
         <div className="px-5 pb-4">
@@ -352,6 +380,25 @@ export const AtifViewerPage: React.FC = () => {
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Evaluation state
+  const [evalReport, setEvalReport] = useState<EvalReport | null>(null);
+  const [evalLoading, setEvalLoading] = useState(false);
+  const [evalError, setEvalError] = useState<string | null>(null);
+
+  const handleRunEval = useCallback(async () => {
+    if (!doc) return;
+    setEvalLoading(true);
+    setEvalError(null);
+    try {
+      const report = await triggerEval(doc.session_id);
+      setEvalReport(report);
+    } catch (e: any) {
+      setEvalError(e.message ?? '评估失败');
+    } finally {
+      setEvalLoading(false);
+    }
+  }, [doc]);
+
   const toggleSection = useCallback((key: string) => {
     setExpandedSections(prev => {
       const next = new Set(prev);
@@ -434,6 +481,13 @@ export const AtifViewerPage: React.FC = () => {
     a.click();
     URL.revokeObjectURL(url);
   }, [doc]);
+
+  // Compute DAG and group nodes by step (memoized).
+  const dag = useMemo(() => (doc ? parseAtifToDag(doc) : null), [doc]);
+  const dagNodesByStep = useMemo(
+    () => (dag ? groupNodesByStep(dag) : new Map<number, DagNode[]>()),
+    [dag],
+  );
 
   // Compute metrics (fallback when final_metrics is partial)
   const computedMetrics = doc ? (() => {
@@ -599,33 +653,201 @@ export const AtifViewerPage: React.FC = () => {
               )}
             </div>
 
-            {/* Step Timeline */}
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900 mb-4">
-                交互轨迹
-                <span className="ml-2 text-sm font-normal text-gray-400">
-                  共 {doc.steps.length} 步
-                </span>
-              </h2>
+            {/* DAG Overview */}
+            {dag && <DagOverview dag={dag} evalReport={evalReport} />}
 
-              {doc.steps.length === 0 ? (
-                <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
-                  <p className="text-4xl text-gray-300 mb-2">--</p>
-                  <p className="text-gray-400">该轨迹暂无步骤数据</p>
+            {/* Evaluation Control */}
+            {doc && (
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <h3 className="text-sm font-semibold text-gray-900">DAG 评估</h3>
+                    {evalReport && evalReport.summary && (
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="px-2 py-0.5 bg-gray-100 rounded">
+                          均分 {evalReport.summary.avg_score.toFixed(2)}/5
+                        </span>
+                        <span className="px-2 py-0.5 bg-red-100 text-red-700 rounded">
+                          {evalReport.summary.failure_count} 失败
+                        </span>
+                        <span className="px-2 py-0.5 bg-orange-100 text-orange-700 rounded">
+                          {evalReport.summary.root_cause_count} 根因
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    onClick={handleRunEval}
+                    disabled={evalLoading}
+                    className="px-4 py-1.5 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {evalLoading ? '评估中...(约5-10分钟)' : '运行评估'}
+                  </button>
                 </div>
-              ) : (
-                <div className="relative pl-4">
-                  {/* Vertical line */}
-                  <div className="absolute left-[5px] top-4 bottom-4 w-0.5 bg-gray-200" />
+                {evalError && (
+                  <div className="mt-2 text-xs text-red-600 bg-red-50 p-2 rounded">{evalError}</div>
+                )}
+              </div>
+            )}
 
-                  {doc.steps.map(step => (
-                    <StepCard
-                      key={step.step_id}
-                      step={step}
-                      expandedSections={expandedSections}
-                      onToggleSection={toggleSection}
-                    />
-                  ))}
+            {/* Step Timeline + Eval Panel (two-column layout) */}
+            <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4">
+              {/* Left: Step Timeline */}
+              <div>
+                <h2 className="text-lg font-semibold text-gray-900 mb-4">
+                  交互轨迹
+                  <span className="ml-2 text-sm font-normal text-gray-400">
+                    共 {doc.steps.length} 步
+                  </span>
+                </h2>
+
+                {doc.steps.length === 0 ? (
+                  <div className="bg-white rounded-xl border border-gray-200 p-8 text-center">
+                    <p className="text-4xl text-gray-300 mb-2">--</p>
+                    <p className="text-gray-400">该轨迹暂无步骤数据</p>
+                  </div>
+                ) : (
+                  <div className="relative pl-4">
+                    {/* Vertical line */}
+                    <div className="absolute left-[5px] top-4 bottom-4 w-0.5 bg-gray-200" />
+
+                    {doc.steps.map(step => (
+                      <StepCard
+                        key={step.step_id}
+                        step={step}
+                        expandedSections={expandedSections}
+                        onToggleSection={toggleSection}
+                        dagNodes={dagNodesByStep.get(step.step_id)}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Right: Eval Score Panel (grouped by step) */}
+              {evalReport && evalReport.nodes.length > 0 && (
+                <div className="hidden lg:block">
+                  <div className="sticky top-4">
+                    <h3 className="text-sm font-semibold text-gray-900 mb-3">节点评分</h3>
+                    {/* Tag meaning legend */}
+                    <div className="mb-3 p-2 bg-gray-50 rounded-lg text-[10px] text-gray-600 space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="px-1.5 py-0.5 bg-red-100 text-red-700 rounded font-medium">根因</span>
+                        <span>= 失败的源头节点（无上游失败）</span>
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="px-1.5 py-0.5 bg-red-100 text-red-700 rounded font-medium">传播</span>
+                        <span>= 失败由上游传播而来（非自身问题）</span>
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="px-1.5 py-0.5 bg-orange-50 text-orange-700 rounded border border-orange-200">橙色标签</span>
+                        <span>= 失败分类（3级21类 Taxonomy）</span>
+                      </div>
+                    </div>
+                    <div className="max-h-[calc(100vh-180px)] overflow-y-auto space-y-3 pr-1">
+                      {/* Group nodes by step_id */}
+                      {(() => {
+                        const grouped = new Map<number, typeof evalReport.nodes>();
+                        for (const en of evalReport.nodes) {
+                          const stepId = Number(en.node_id.match(/^s(\d+)\./)?.[1] ?? 0);
+                          const arr = grouped.get(stepId) ?? [];
+                          arr.push(en);
+                          grouped.set(stepId, arr);
+                        }
+                        return Array.from(grouped.entries()).map(([stepId, nodes]) => {
+                          const avgScore = nodes.reduce((s, n) => s + n.score, 0) / nodes.length;
+                          const hasFailure = nodes.some(n => n.is_failure);
+                          const cardBorder = hasFailure ? 'border-red-300' : avgScore >= 4 ? 'border-green-300' : 'border-gray-200';
+                          return (
+                            <div key={stepId} className={`bg-white rounded-lg border ${cardBorder} overflow-hidden`}>
+                              {/* Step header */}
+                              <div className={`px-3 py-2 flex items-center justify-between ${hasFailure ? 'bg-red-50' : 'bg-gray-50'} border-b border-gray-100`}>
+                                <span className="text-xs font-semibold text-gray-700">Step {stepId}</span>
+                                <span className={`text-xs font-bold ${avgScore >= 4 ? 'text-green-700' : avgScore >= 3 ? 'text-yellow-700' : 'text-red-700'}`}>
+                                  {avgScore.toFixed(1)}/5
+                                </span>
+                              </div>
+                              {/* Nodes in this step */}
+                              <div className="divide-y divide-gray-50">
+                                {nodes.map((en) => {
+                                  const attrType = en.attribution?.type ?? 'Pass';
+                                  const scoreClass = en.score >= 4 ? 'text-green-700' : en.score === 3 ? 'text-yellow-700' : 'text-red-700';
+                                  return (
+                                    <div key={en.node_id} className="px-3 py-2">
+                                      <div className="flex items-center justify-between gap-2">
+                                        <div className="flex items-center gap-1.5 min-w-0">
+                                          <span className="text-[10px] px-1.5 py-0.5 bg-gray-100 rounded shrink-0">{en.node_type}</span>
+                                          <span className="text-[11px] font-mono text-gray-500 truncate" title={en.node_id}>
+                                            {en.node_id.replace(/^s\d+\./, '')}
+                                          </span>
+                                        </div>
+                                        <span className={`text-sm font-bold shrink-0 ${scoreClass}`}>{en.score}</span>
+                                      </div>
+                                      {en.is_failure && (
+                                        <div className="mt-1.5 space-y-1">
+                                          <div className="flex items-center gap-1 flex-wrap">
+                                            <span className="text-[10px] px-1.5 py-0.5 bg-red-100 text-red-700 rounded font-medium">
+                                              {attrType === 'RootCause' ? '根因' : '传播'}
+                                            </span>
+                                            {en.failure_class && (
+                                              <span className="text-[10px] px-1.5 py-0.5 bg-orange-50 text-orange-700 rounded border border-orange-200">
+                                                {en.failure_class.level1} / {en.failure_class.level2} / {en.failure_class.level3}
+                                              </span>
+                                            )}
+                                          </div>
+                                          {en.reasoning && (
+                                            <details className="group" open>
+                                              <summary className="text-[10px] text-blue-600 cursor-pointer hover:text-blue-800">展开 Judge 推理</summary>
+                                              <pre className="mt-1 text-[10px] text-gray-600 whitespace-pre-wrap break-words bg-gray-50 rounded p-2 max-h-48 overflow-y-auto">
+                                                {en.reasoning}
+                                              </pre>
+                                            </details>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        });
+                      })()}
+
+                      {/* Taxonomy legend */}
+                      <details className="mt-4">
+                        <summary className="text-[11px] text-gray-500 cursor-pointer hover:text-gray-700 font-medium">
+                          失败分类说明 (Taxonomy)
+                        </summary>
+                        <div className="mt-2 text-[10px] text-gray-600 bg-gray-50 rounded-lg p-3 space-y-2">
+                          <div>
+                            <span className="font-semibold text-gray-800">Planning（规划层）</span>
+                            <ul className="ml-3 mt-0.5 space-y-0.5 list-disc list-inside">
+                              <li><b>Goal misinterpretation</b> — 目标理解偏差（Scope error / Ambiguity failure）</li>
+                              <li><b>Missing steps</b> — 遗漏关键步骤（Tool omission / Verification gap / Prerequisite skip）</li>
+                              <li><b>Incorrect ordering</b> — 执行顺序错误（Dependency violation / Suboptimal sequence）</li>
+                            </ul>
+                          </div>
+                          <div>
+                            <span className="font-semibold text-gray-800">Execution（执行层）</span>
+                            <ul className="ml-3 mt-0.5 space-y-0.5 list-disc list-inside">
+                              <li><b>Wrong tool selection</b> — 工具选错（Category error / Granularity mismatch）</li>
+                              <li><b>Parameter errors</b> — 参数错误（Type mismatch / Value error / Missing required）</li>
+                              <li><b>API/tool failures</b> — 工具执行失败（Timeout / Error response）</li>
+                            </ul>
+                          </div>
+                          <div>
+                            <span className="font-semibold text-gray-800">Integration（整合层）</span>
+                            <ul className="ml-3 mt-0.5 space-y-0.5 list-disc list-inside">
+                              <li><b>Context loss</b> — 上下文丢失（Truncation / Selective omission）</li>
+                              <li><b>Output hallucination</b> — 输出幻觉（Fabrication / Conflation）</li>
+                              <li><b>Premature termination</b> — 过早结束（Partial completion / Loop exit）</li>
+                            </ul>
+                          </div>
+                        </div>
+                      </details>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>

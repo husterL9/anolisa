@@ -204,6 +204,8 @@ pub async fn run_server(host: &str, port: u16, storage_path: PathBuf) -> std::io
             .service(handlers::skill_metrics_usage_ratio)
             .service(handlers::skill_metrics_distribution)
             .service(handlers::skill_metrics_hotness)
+            // Evaluation API routes
+            .service(handlers::trigger_eval)
             // Frontend static files (catch-all, must be last)
             .service(serve_frontend)
     })

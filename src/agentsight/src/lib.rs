@@ -46,6 +46,7 @@ pub mod atif;
 pub mod chrome_trace;
 pub mod discovery;
 pub mod event;
+pub mod eval;
 pub mod ffi;
 pub mod genai;
 pub mod health;

@@ -587,3 +587,46 @@ export async function fetchSkillMetrics(
     `${API_BASE}/api/skill-metrics${buildSkillMetricsParams(startNs, endNs, agentName, granularity)}`
   );
 }
+
+// ─── Evaluation API ─────────────────────────────────────────────────────────
+
+export interface EvalNodeResult {
+  node_id: string;
+  node_type: string;
+  score: number;
+  reasoning: string;
+  is_failure: boolean;
+  failure_class: { level1: string; level2: string; level3: string; explanation: string } | null;
+  attribution: { type: 'Pass' } | { type: 'RootCause' } | { type: 'PropagatedFrom'; source: string };
+}
+
+export interface EvalSummary {
+  total_nodes: number;
+  evaluated_nodes: number;
+  avg_score: number;
+  failure_count: number;
+  root_cause_count: number;
+  propagated_count: number;
+}
+
+export interface EvalReport {
+  eval_id: string;
+  session_id: string;
+  judge_model: string;
+  created_at: number;
+  completed_at: number;
+  status: string;
+  nodes: EvalNodeResult[];
+  summary: EvalSummary | null;
+  error: string | null;
+}
+
+/** Trigger DAG evaluation for a session (may take 2-10 minutes). */
+export async function triggerEval(sessionId: string): Promise<EvalReport> {
+  const resp = await fetch(`${API_BASE}/api/eval/session/${sessionId}`, { method: 'POST' });
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`Eval failed: HTTP ${resp.status} ${body}`);
+  }
+  return resp.json();
+}

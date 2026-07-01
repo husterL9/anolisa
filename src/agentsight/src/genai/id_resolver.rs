@@ -216,7 +216,7 @@ impl IdResolver {
 ///
 /// 输出 = `SHA256("crash-{domain}|agent_name|pid|user_text")[..32]`。
 /// `crash-` 前缀与正常路径的 `session`/`conversation` 前缀做域分离，避免
-/// crash 兑底 ID 与正常调用 ID 碰撞。
+/// crash 兜底 ID 与正常调用 ID 碰撞。
 pub fn crash_fallback_id(domain: &str, agent_name: &str, pid: i32, user_text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(format!("crash-{domain}").as_bytes());
